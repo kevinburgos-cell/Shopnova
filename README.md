@@ -1,3 +1,4 @@
+<<<<<<< HEAD
 # ShopNova - Plataforma E-Commerce
 
 Proyecto final DevOps — Kevin Esteban Burgos Cobo (2453710)
@@ -74,3 +75,6 @@ Cada push a `main` o `develop` ejecuta automáticamente:
 | DELETE | /api/cart/:userId/items/:id | Eliminar ítem |
 | POST | /api/orders | Crear orden |
 | GET | /api/orders/user/:userId | Órdenes del usuario |
+=======
+# Shopn
+>>>>>>> b3f9d82f4b791da8b2a8df3fd8cd17e2396e7609
