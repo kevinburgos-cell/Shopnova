@@ -30,7 +30,7 @@ jobs:
  
       - name: Ejecutar tests con cobertura
         working-directory: backend
-        run: npm test -- --coverage --coverageReporters=lcov --coverageReporters=text-summary
+        run: npx jest --coverage --coverageReporters=lcov --coverageReporters=text-summary --coverageReporters=json-summary
         env:
           NODE_ENV: test
  
