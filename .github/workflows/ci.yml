@@ -1,39 +1,43 @@
 name: ShopNova CI/CD Pipeline
- 
+
 on:
   push:
     branches: [ main, develop ]
   pull_request:
     branches: [ main ]
- 
+
+env:
+  REGISTRY: ghcr.io
+  IMAGE_NAME: ${{ github.repository_owner }}/shopnova-backend
+
 jobs:
   test-and-analyze:
     name: Tests + SonarCloud Analysis
     runs-on: ubuntu-latest
- 
+
     steps:
       - name: Checkout código
         uses: actions/checkout@v4
         with:
           fetch-depth: 0
- 
+
       - name: Setup Node.js
         uses: actions/setup-node@v4
         with:
           node-version: '20'
           cache: 'npm'
           cache-dependency-path: backend/package.json
- 
+
       - name: Instalar dependencias del backend
         working-directory: backend
         run: npm install
- 
+
       - name: Ejecutar tests con cobertura
         working-directory: backend
         run: npx jest --coverage --coverageReporters=lcov --coverageReporters=text-summary --coverageReporters=json-summary
         env:
           NODE_ENV: test
- 
+
       - name: Verificar cobertura mínima 60%
         working-directory: backend
         run: |
@@ -47,7 +51,7 @@ jobs:
             exit 1
           fi
           echo "Cobertura OK: $COVERAGE%"
- 
+
       - name: Análisis SonarCloud
         uses: SonarSource/sonarcloud-github-action@master
         env:
@@ -55,7 +59,7 @@ jobs:
           SONAR_TOKEN: ${{ secrets.SONAR_TOKEN }}
         with:
           projectBaseDir: backend
- 
+
       - name: Subir reporte de cobertura como artefacto
         uses: actions/upload-artifact@v4
         if: always()
@@ -63,31 +67,81 @@ jobs:
           name: coverage-report
           path: backend/coverage/
           retention-days: 7
- 
-  build-check:
-    name: Verificar build
+
+  build-and-push:
+    name: Build y Push imagen Docker
     runs-on: ubuntu-latest
     needs: test-and-analyze
- 
+    if: github.ref == 'refs/heads/main'
+
+    outputs:
+      image_tag: ${{ steps.meta.outputs.version }}
+
     steps:
       - name: Checkout código
         uses: actions/checkout@v4
- 
-      - name: Setup Node.js
-        uses: actions/setup-node@v4
+
+      - name: Login a GitHub Container Registry
+        uses: docker/login-action@v3
         with:
-          node-version: '20'
- 
-      - name: Instalar dependencias backend
-        working-directory: backend
-        run: npm install --production
- 
-      - name: Verificar que la app inicia
-        working-directory: backend
+          registry: ${{ env.REGISTRY }}
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Extraer metadatos de la imagen
+        id: meta
+        uses: docker/metadata-action@v5
+        with:
+          images: ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}
+          tags: |
+            type=sha,prefix=,suffix=,format=short
+            type=raw,value=latest
+
+      - name: Build y Push imagen Docker
+        uses: docker/build-push-action@v5
+        with:
+          context: backend
+          file: backend/Dockerfile
+          push: true
+          tags: ${{ steps.meta.outputs.tags }}
+          labels: ${{ steps.meta.outputs.labels }}
+
+  deploy:
+    name: Blue-Green Deploy a EC2
+    runs-on: ubuntu-latest
+    needs: build-and-push
+    if: github.ref == 'refs/heads/main'
+
+    steps:
+      - name: Checkout código
+        uses: actions/checkout@v4
+
+      - name: Configurar SSH
         run: |
-          timeout 10 node src/app.js &
-          sleep 3
-          curl -f http://localhost:3001/api/health || exit 1
-          echo "App arranca correctamente"
-        continue-on-error: false
- 
+          mkdir -p ~/.ssh
+          echo "${{ secrets.EC2_SSH_KEY }}" > ~/.ssh/shopnova_key.pem
+          chmod 600 ~/.ssh/shopnova_key.pem
+          ssh-keyscan -H ${{ secrets.EC2_HOST }} >> ~/.ssh/known_hosts
+
+      - name: Copiar script de deploy a EC2
+        run: |
+          scp -i ~/.ssh/shopnova_key.pem \
+            backend/deploy.sh \
+            ubuntu@${{ secrets.EC2_HOST }}:~/deploy.sh
+          ssh -i ~/.ssh/shopnova_key.pem ubuntu@${{ secrets.EC2_HOST }} \
+            "chmod +x ~/deploy.sh"
+
+      - name: Ejecutar Blue-Green Deploy en EC2
+        run: |
+          ssh -i ~/.ssh/shopnova_key.pem ubuntu@${{ secrets.EC2_HOST }} \
+            "~/deploy.sh ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }} ${{ needs.build-and-push.outputs.image_tag }}"
+
+      - name: Verificar deploy exitoso
+        run: |
+          sleep 10
+          STATUS=$(curl -sf http://${{ secrets.EC2_HOST }}/api/health | python3 -c "import sys,json; d=json.load(sys.stdin); print(d.get('status','error'))" 2>/dev/null || echo "error")
+          if [ "$STATUS" != "ok" ]; then
+            echo "ERROR: El deploy falló, la app no responde correctamente"
+            exit 1
+          fi
+          echo "Deploy verificado: ShopNova está corriendo en producción"
